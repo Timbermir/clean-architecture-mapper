@@ -2,15 +2,12 @@ package corp.tbm.cleanarchitecturemapper.processor
 
 import com.google.devtools.ksp.*
 import com.google.devtools.ksp.processing.*
-import com.google.devtools.ksp.symbol.ClassKind
 import com.google.devtools.ksp.symbol.KSAnnotated
 import com.google.devtools.ksp.symbol.KSClassDeclaration
 import com.google.devtools.ksp.symbol.KSPropertyDeclaration
 import com.squareup.kotlinpoet.*
 import com.squareup.kotlinpoet.ParameterizedTypeName.Companion.parameterizedBy
-import com.squareup.kotlinpoet.ksp.toClassName
 import com.squareup.kotlinpoet.ksp.toKModifier
-import com.squareup.kotlinpoet.ksp.toTypeName
 import corp.tbm.cleanarchitecturemapper.foundation.annotations.DTO
 import corp.tbm.cleanarchitecturemapper.foundation.codegen.kotlinpoet.allowedDataClassPropertiesModifiers
 import corp.tbm.cleanarchitecturemapper.foundation.codegen.universal.DTOMapper
@@ -72,30 +69,33 @@ class DTOProcessor(private val codeGenerator: CodeGenerator, val logger: KSPLogg
 
         symbols.forEach { symbol ->
 
-            if (processingRound == 1) {
-                symbol.getDeclaredProperties().forEach { property ->
-                    val packageName = "${
-                        symbol.packageName.asString().split(".").dropLast(1)
-                            .joinToString(".") + "." + symbol.simpleName.asString().replace(dtoRegex, "")
-                            .firstCharLowercase()
-                    }.model"
+            if (symbol.getDeclaredProperties()
+                    .any { property -> property.annotations.filter { it.name.endsWith("Enum") }.toList().isNotEmpty() }
+            )
+                if (processingRound == 1) {
+                    symbol.getDeclaredProperties().forEach { property ->
+                        val packageName = "${
+                            symbol.packageName.asString().split(".").dropLast(1)
+                                .joinToString(".") + "." + symbol.simpleName.asString().replace(dtoRegex, "")
+                                .firstCharLowercase()
+                        }.model"
 
-                    val propertyAnnotations = property.annotations.filter { it.name.endsWith("Enum") }.toList()
+                        val propertyAnnotations = property.annotations.filter { it.name.endsWith("Enum") }.toList()
 
-                    if (propertyAnnotations.isNotEmpty()) {
+                        if (propertyAnnotations.isNotEmpty()) {
 
-                        if (propertyAnnotations.size >= 2) {
-                            throw PropertyAlreadyMarkedWithEnumException(
-                                "Property [${property.name}] in \n[${property.parentDeclaration?.fullyQualifiedName}] has the following $propertyAnnotations enums annotations. Only 1 is allowed"
-                            )
+                            if (propertyAnnotations.size >= 2) {
+                                throw PropertyAlreadyMarkedWithEnumException(
+                                    "Property [${property.name}] in \n[${property.parentDeclaration?.fullyQualifiedName}] has the following $propertyAnnotations enums annotations. Only 1 is allowed"
+                                )
+                            }
+
+                            property.accept(enumGenerateVisitor, "$packageName.enums")
                         }
 
-                        property.accept(enumGenerateVisitor, "$packageName.enums")
                     }
-
+                    return symbols.filter { it.validate() }
                 }
-                return symbols.filter { it.validate() }
-            }
 
             generateClass(resolver, symbol, "Model")
 
@@ -285,48 +285,6 @@ class DTOProcessor(private val codeGenerator: CodeGenerator, val logger: KSPLogg
                 .joinToString(".") + "." + symbol.simpleName.asString().replace(dtoRegex, "").firstCharLowercase()
         }.${neededSuffix.lowercase()}"
 
-        properties.forEach {
-            if (it.type.resolve().declaration.closestClassDeclaration()?.classKind == ClassKind.ENUM_CLASS) {
-                val enum = it.type.resolve().declaration.closestClassDeclaration()
-
-                val parameters = mutableSetOf<ParameterSpec>()
-
-                enum?.getDeclaredProperties()?.forEach {
-                    parameters.add(ParameterSpec(it.name, it.type.resolve().toTypeName()))
-                }
-
-                val enumBuilder = TypeSpec.enumBuilder(enum.name)
-
-                val primaryConstructor = FunSpec.constructorBuilder()
-
-                parameters.forEach {
-                    primaryConstructor.addParameter(it)
-                }
-                parameters.map { PropertySpec.builder(it.name, it.type).build() }.map { enumBuilder.addProperty(it) }
-
-                val enumEntries = enum?.declarations?.toList()
-                    ?.filter { it.closestClassDeclaration()?.classKind == ClassKind.ENUM_ENTRY }
-                    ?.map { it.closestClassDeclaration() }
-
-                enumEntries?.forEach { enumEntry ->
-
-                    enumEntry?.getAllProperties()?.toList()?.forEach {
-//                        enumBuilder.addEnumConstant(
-//                            it.name,
-//                            TypeSpec.anonymousClassBuilder()
-//                                .addSuperclassConstructorParameter(
-//                                    when (it.type.resolve().toClassName().simpleName == "String") {
-//                                        true -> "%S"
-//                                        else -> "%L"
-//                                    },
-//                                    "${it.name} = $enumValue${enumType.parameterValueSuffix.toString().trim()}"
-//                                ).build()
-//                        )
-                    }
-                }
-            }
-        }
-
         val classToBuild = classBuilder(
             TypeSpec.classBuilder(className)
                 .addModifiers(KModifier.DATA)
@@ -349,8 +307,12 @@ class DTOProcessor(private val codeGenerator: CodeGenerator, val logger: KSPLogg
                             property.determineParameterType(symbol, resolver, packageName, logger)
                         ).also {
                             it.mutable(property.isMutable)
-                            it.addModifiers(property.modifiers.toList().map { it.toKModifier() }
-                                .filter { it?.name in allowedDataClassPropertiesModifiers.map { it.name } }
+                            it.addModifiers(property.modifiers.toList().map { modifier -> modifier.toKModifier() }
+                                .filter { modifier ->
+                                    modifier?.name in allowedDataClassPropertiesModifiers.map { allowedModifier ->
+                                        allowedModifier.name
+                                    }
+                                }
                                 .filterNotNull())
                             it.initializer(
                                 property.name
